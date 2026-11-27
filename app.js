@@ -142,10 +142,24 @@ function rankChargers(chargers, opts) {
 // Map + UI
 // ---------------------------------------------------------------------------
 const map = L.map('map', { preferCanvas: true }).setView([54.5, -3], 6); // canvas copes with thousands of dots
-L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 19,
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-}).addTo(map);
+// Base maps: CARTO styles (free, no key) drawn from OpenStreetMap data, plus the standard OSM style.
+const OSM_CREDIT = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+const carto = (style) => L.tileLayer(`https://{s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png`, {
+  maxZoom: 20, subdomains: 'abcd',
+  attribution: `${OSM_CREDIT} &copy; <a href="https://carto.com/attributions">CARTO</a>`,
+});
+const baseMaps = {
+  Voyager: carto('rastertiles/voyager'),
+  Light: carto('light_all'),
+  Dark: carto('dark_all'),
+  OpenStreetMap: L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: OSM_CREDIT }),
+};
+let savedBase = null;
+try { savedBase = localStorage.getItem('basemap'); } catch { /* storage blocked */ }
+const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches;
+(baseMaps[savedBase] || (prefersDark ? baseMaps.Dark : baseMaps.Voyager)).addTo(map);
+L.control.layers(baseMaps, null, { position: 'topright' }).addTo(map);
+map.on('baselayerchange', (e) => { try { localStorage.setItem('basemap', e.name); } catch { /* ignore */ } });
 const chargerLayer = L.layerGroup().addTo(map);
 const placeLayer = L.layerGroup().addTo(map);
 let originMarker = null;
