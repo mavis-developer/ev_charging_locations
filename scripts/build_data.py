@@ -62,43 +62,65 @@ def haversine(lat1, lon1, lat2, lon2):
 
 OUTPUT_KEY = re.compile(r'^(socket:.+:output|charging_station:output)$')
 SOCKET_KEY = re.compile(r'^socket:([a-z0-9_]+)$')
+# Display names for OSM socket:* keys. The app's connector filter groups on these names
+# (Type 2, CCS, CHAdeMO, Tesla, 3-pin plug), so keep them in step with CONNECTOR_GROUPS in app.js.
 SOCKET_NAMES = {
     'type2': 'Type 2', 'type2_combo': 'CCS', 'chademo': 'CHAdeMO', 'type1': 'Type 1',
     'type1_combo': 'CCS1', 'tesla_supercharger': 'Tesla', 'nacs': 'NACS',
+    'tesla_supercharger_ccs': 'CCS', 'ccs': 'CCS',
     'type2_cable': 'Type 2 (tethered)', 'bs1363': '3-pin plug', 'type3c': 'Type 3C',
+    'schuko': 'Schuko', 'cee_blue': 'Blue Commando',
 }
 
 
-def max_power_kw(tags):
+def parse_output_kw(value):
+    """Highest power in an OSM *:output value such as '22 kW', '7;22 kW' or '50000'."""
     best = 0.0
-    for k, v in tags.items():
-        if not OUTPUT_KEY.match(k):
+    for part in re.split(r'[;,]', value):
+        m = re.match(r'^([\d.]+)\s*(kw|w|kva)?$', part.strip(), re.I)
+        if not m:
             continue
-        for part in re.split(r'[;,]', v):
-            m = re.match(r'^([\d.]+)\s*(kw|w|kva)?$', part.strip(), re.I)
-            if not m:
-                continue
-            try:
-                kw = float(m.group(1))
-            except ValueError:
-                continue
-            unit = (m.group(2) or '').lower()
-            if unit == 'w' or (not unit and kw > 1000):
-                kw /= 1000
-            if best < kw < 1000:
-                best = kw
+        try:
+            kw = float(m.group(1))
+        except ValueError:
+            continue
+        unit = (m.group(2) or '').lower()
+        if unit == 'w' or (not unit and kw > 1000):
+            kw /= 1000
+        if best < kw < 1000:
+            best = kw
     return round(best, 1) if best else None
 
 
-def socket_types(tags):
-    out = []
+def max_power_kw(tags):
+    outs = [parse_output_kw(v) for k, v in tags.items() if OUTPUT_KEY.match(k)]
+    outs = [x for x in outs if x]
+    return max(outs) if outs else None
+
+
+def connectors(tags):
+    """[[name, kW or None], …] from OSM socket:<type> and socket:<type>:output tags."""
+    cx = {}
     for k, v in tags.items():
         m = SOCKET_KEY.match(k)
-        if m and v not in ('no', '0'):
-            name = SOCKET_NAMES.get(m.group(1), m.group(1))
-            if name not in out:
-                out.append(name)
-    return out
+        if not m or v in ('no', '0'):
+            continue
+        name = SOCKET_NAMES.get(m.group(1), m.group(1).replace('_', ' ').capitalize())
+        out = tags.get('socket:%s:output' % m.group(1))
+        cx[name] = max_kw(cx.get(name), parse_output_kw(out) if out else None)
+    return [[n, kw] for n, kw in cx.items()]
+
+
+def max_kw(a, b):
+    return max(x for x in (a, b) if x is not None) if (a is not None or b is not None) else None
+
+
+def merge_connectors(a, b):
+    """Union of two connector lists, keeping the higher power for a connector on both."""
+    cx = {n: kw for n, kw in a}
+    for n, kw in b:
+        cx[n] = max_kw(cx.get(n), kw) if n in cx else kw
+    return [[n, kw] for n, kw in cx.items()]
 
 
 def area_points(obj):
@@ -157,7 +179,7 @@ def read_osm(path, cat_lookup, keys):
                 'name': t.get('name') or t.get('operator') or t.get('network') or t.get('brand'),
                 'op': t.get('operator') or t.get('network') or t.get('brand'),
                 'kw': max_power_kw(t),
-                'sk': socket_types(t),
+                'cx': connectors(t),
                 'fee': t.get('fee'),
                 'acc': t.get('access') if t.get('access') == 'customers' else None,
                 'wc': t.get('toilets') == 'yes',
@@ -184,7 +206,7 @@ def cell(lat, lon):
 def dedupe_chargers(chargers, radius=DEDUPE_M):
     """Merge charger points within DEDUPE_M of each other (OSM often maps one site several times)."""
     # Prefer entries with more information as the surviving record.
-    chargers.sort(key=lambda c: (c['kw'] is None, c['name'] is None, -len(c['sk'])))
+    chargers.sort(key=lambda c: (c['kw'] is None, c['name'] is None, -len(c['cx'])))
     grid = defaultdict(list)
     kept = []
     for c in chargers:
@@ -203,7 +225,7 @@ def dedupe_chargers(chargers, radius=DEDUPE_M):
         if match:
             if c['kw'] and (not match['kw'] or c['kw'] > match['kw']):
                 match['kw'] = c['kw']
-            match['sk'] += [s for s in c['sk'] if s not in match['sk']]
+            match['cx'] = merge_connectors(match['cx'], c['cx'])
             match['name'] = match['name'] or c['name']
             match['wc'] = match['wc'] or c['wc']
             # Several operators at one site (e.g. Tesla + InstaVolt at services): list them all.
@@ -248,7 +270,7 @@ def merge_sources(ocm_chargers, osm_chargers):
         for k in ('kw', 'name', 'op', 'fee'):
             if not best.get(k) and o.get(k):
                 best[k] = o[k]
-        best['sk'] += [s for s in o['sk'] if s not in best['sk']]
+        best['cx'] = merge_connectors(best['cx'], o['cx'])
         best['wc'] = best['wc'] or o['wc']
     return ocm_chargers + extra, merged, len(extra)
 
@@ -311,7 +333,10 @@ def write_tiles(chargers, places, out_dir, source, sources, attribution):
             rec = {'id': c['id'], 'lat': round(c['lat'], 5), 'lon': round(c['lon'], 5), 'near': near}
             if c.get('op') == c.get('name'):
                 c['op'] = None
-            for k in ('src', 'name', 'op', 'kw', 'sk', 'pts', 'cost', 'fee', 'acc', 'mem', 'wc'):
+            if c.get('cx'):
+                # Connector power can be higher than an unset site power; keep the site figure honest.
+                c['kw'] = max_kw(c.get('kw'), max((kw for _, kw in c['cx'] if kw), default=None))
+            for k in ('src', 'name', 'op', 'kw', 'cx', 'pts', 'cost', 'fee', 'acc', 'mem', 'wc'):
                 if c.get(k):
                     rec[k] = c[k]
             out_chargers.append(rec)

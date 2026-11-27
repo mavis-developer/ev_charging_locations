@@ -6,6 +6,54 @@
 const WALK_M_PER_MIN = 80;            // ~4.8 km/h
 const PAGE_SIZE = 25;                 // chargers listed at a time ("Show more" adds another page)
 
+// Charger speed bands (UK convention). `max` is exclusive.
+const SPEED_BANDS = [
+  { key: 'slow',  label: 'Slow',        range: 'under 7 kW', max: 7 },
+  { key: 'fast',  label: 'Fast',        range: '7–22 kW',    max: 25 },
+  { key: 'rapid', label: 'Rapid',       range: '25–99 kW',   max: 100 },
+  { key: 'ultra', label: 'Ultra-rapid', range: '100 kW+',    max: Infinity },
+  { key: 'unknown', label: 'Unknown',   range: 'speed not recorded' },
+];
+// One-hue scale, faster = stronger. Checked with the data-viz palette validator (ordinal mode)
+// against the actual map backgrounds: Light grey #ececec and Dark grey #444448.
+const SPEED_COLOURS = {
+  light: { slow: '#519ced', fast: '#2370cd', rapid: '#1757ac', ultra: '#0e3d7e', unknown: '#8a8f96' },
+  dark:  { slow: '#338ced', fast: '#6aabf1', rapid: '#9dc8f7', ultra: '#cce3fd', unknown: '#a3a8ae' },
+};
+// Connector filter groups; names must match the build's connector names (scripts/build_data.py, scripts/ocm.py).
+const CONNECTOR_GROUPS = [
+  { key: 'type2',   label: 'Type 2',     names: ['Type 2', 'Type 2 (tethered)'] },
+  { key: 'ccs',     label: 'CCS',        names: ['CCS', 'CCS1'] },
+  { key: 'chademo', label: 'CHAdeMO',    names: ['CHAdeMO'] },
+  { key: 'tesla',   label: 'Tesla',      names: ['Tesla', 'NACS'] },
+  { key: 'plug',    label: '3-pin plug', names: ['3-pin plug'] },
+];
+
+function speedBand(kw) {
+  if (!kw) return 'unknown';
+  return SPEED_BANDS.find((b) => b.max !== undefined && kw < b.max).key;
+}
+
+/**
+ * Apply the speed and connector filters together. Returns the connectors you could use and the
+ * fastest of them (that's the speed shown and coloured), or null if the charger doesn't qualify.
+ */
+function matchCharger(ch, speeds, groups) {
+  // Older data builds had a connector-name list ('sk') without per-connector power.
+  const cx = ch.cx || (ch.sk || []).map((n) => [n, null]);
+  let usable = cx;
+  if (groups.size) {
+    const names = new Set(CONNECTOR_GROUPS.filter((g) => groups.has(g.key)).flatMap((g) => g.names));
+    usable = cx.filter(([n]) => names.has(n));
+    if (!usable.length) return null;
+  }
+  // A connector without its own power figure is assumed to run at the site's top speed.
+  const kws = usable.map(([, kw]) => kw ?? ch.kw).filter(Boolean);
+  const effKw = kws.length ? Math.max(...kws) : (groups.size ? null : ch.kw || null);
+  const band = speedBand(effKw);
+  return speeds.has(band) ? { usable, effKw, band } : null;
+}
+
 let CATEGORIES = [];                  // all categories, index = category id used in tiles
 let ACTIVITIES = [];                  // categories offered as activities (not facilities)
 let INDEX = null;                     // data/index.json
@@ -205,11 +253,12 @@ function formatDuration(s) {
  * off the route). `detourScale` sets how hard detours are penalised.
  */
 function rankChargers(chargers, opts) {
-  const { walkM, dwell, selectedKeys, rapidOnly, needToilets, detourScale } = opts;
+  const { walkM, dwell, selectedKeys, speeds, groups, needToilets, detourScale } = opts;
   const scored = [];
 
   for (const ch of chargers) {
-    if (rapidOnly && !(ch.kw >= 50)) continue;
+    const m = matchCharger(ch, speeds, groups);
+    if (!m) continue;
 
     const nearby = ch.nearby.filter((p) => p.dist <= walkM).sort((a, b) => a.dist - b.dist);
     const hasToilets = ch.wc || nearby.some((p) => p.cat.key === 'toilets');
@@ -231,7 +280,7 @@ function rankChargers(chargers, opts) {
     score *= 1 + 0.25 * (Object.keys(perCat).length - 1);
     score /= 1 + ch.detourM / detourScale;
 
-    scored.push({ ...ch, activities, perCat, hasToilets, score });
+    scored.push({ ...ch, ...m, activities, perCat, hasToilets, score });
   }
 
   return scored.sort((a, b) => b.score - a.score);
@@ -273,7 +322,35 @@ try { savedBase = localStorage.getItem('basemap2'); } catch { /* storage blocked
 const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches;
 (baseMaps[savedBase] || (prefersDark ? baseMaps['Dark grey'] : baseMaps['Light grey'])).addTo(map);
 L.control.layers(baseMaps, null, { position: 'topright' }).addTo(map);
-map.on('baselayerchange', (e) => { try { localStorage.setItem('basemap2', e.name); } catch { /* ignore */ } });
+// Which colour scale the dots use depends on how dark the map underneath is.
+const DARK_BASES = new Set(['Dark grey', 'Satellite']);
+let activeBase = baseMaps[savedBase] ? savedBase : (prefersDark ? 'Dark grey' : 'Light grey');
+const colours = () => SPEED_COLOURS[DARK_BASES.has(activeBase) ? 'dark' : 'light'];
+const routeColour = () => (DARK_BASES.has(activeBase) ? '#e2e8f0' : '#334155');
+
+map.on('baselayerchange', (e) => {
+  try { localStorage.setItem('basemap2', e.name); } catch { /* ignore */ }
+  activeBase = e.name;
+  renderLegend();
+  renderSpeedChips(true);
+  routeLayer.eachLayer((l) => l.setStyle?.({ color: routeColour() }));
+  if (results.length) renderMap();
+});
+
+// Speed key in the map's bottom-left corner.
+const legend = L.control({ position: 'bottomleft' });
+legend.onAdd = () => {
+  const div = L.DomUtil.create('div', 'legend');
+  L.DomEvent.disableClickPropagation(div);
+  return div;
+};
+legend.addTo(map);
+function renderLegend() {
+  const c = colours();
+  legend.getContainer().innerHTML = '<strong>Charger speed</strong>' + SPEED_BANDS.map((b) =>
+    `<div><span class="swatch" style="background:${c[b.key]}"></span>${b.label} <span class="hint">${b.range}</span></div>`).join('');
+}
+renderLegend();
 const routeLayer = L.layerGroup().addTo(map);
 const chargerLayer = L.layerGroup().addTo(map);
 const placeLayer = L.layerGroup().addTo(map);
@@ -291,6 +368,23 @@ function renderChips() {
   $('activities').innerHTML = ACTIVITIES.map((c, i) => `
     <label class="chip"><input type="checkbox" value="${c.key}" ${i < 2 ? 'checked' : ''}>
     <span>${c.emoji} ${escapeHtml(c.label)}</span></label>`).join('');
+  renderSpeedChips(false);
+  $('connectors').innerHTML = CONNECTOR_GROUPS.map((g) => `
+    <label class="chip"><input type="checkbox" value="${g.key}"><span>${escapeHtml(g.label)}</span></label>`).join('');
+}
+
+/** Speed chips carry the same colour swatches as the map. keepState = keep current ticks (on a map-style change). */
+function renderSpeedChips(keepState) {
+  const ticked = keepState ? checkedValues('speeds') : new Set(SPEED_BANDS.map((b) => b.key));
+  const c = colours();
+  $('speeds').innerHTML = SPEED_BANDS.map((b) => `
+    <label class="chip" title="${b.range}"><input type="checkbox" value="${b.key}" ${ticked.has(b.key) ? 'checked' : ''}>
+    <span><span class="swatch" style="background:${c[b.key]}"></span>${b.label}</span></label>`).join('');
+}
+
+const checkedValues = (id) => new Set([...document.querySelectorAll(`#${id} input:checked`)].map((el) => el.value));
+function setSpeeds(keys) {
+  document.querySelectorAll('#speeds input').forEach((el) => { el.checked = keys.has(el.value); });
 }
 
 function setStatus(msg, isError = false) {
@@ -303,14 +397,17 @@ const chargerTitle = (ch) => ch.name || 'EV charger';
 /** Every matching charger goes on the map; the ones listed so far are big, the rest small dots. */
 function renderMap() {
   chargerLayer.clearLayers();
+  const c = colours();
   // Draw the unlisted dots first so the listed (bigger) markers sit on top.
+  // Colour = speed; the white ring keeps overlapping dots apart.
   for (let i = results.length - 1; i >= 0; i--) {
     const ch = results[i];
     const listed = i < shownCount;
+    const fill = c[ch.band];
     L.circleMarker([ch.lat, ch.lon], listed
-      ? { radius: 9, color: '#0b8a5f', weight: 2, fillColor: '#2fbf87', fillOpacity: 0.9 }
-      : { radius: 5, color: '#0b8a5f', weight: 1, fillColor: '#2fbf87', fillOpacity: 0.45 })
-      .bindTooltip(`${i + 1}. ${escapeHtml(chargerTitle(ch))}`)
+      ? { radius: 9, color: '#ffffff', weight: 2, fillColor: fill, fillOpacity: 1 }
+      : { radius: 5.5, color: '#ffffff', weight: 1.5, fillColor: fill, fillOpacity: 0.85 })
+      .bindTooltip(`${i + 1}. ${escapeHtml(chargerTitle(ch))} · ${ch.effKw ? `${ch.effKw} kW` : 'speed unknown'}`)
       .on('click', () => focusCharger(i))
       .addTo(chargerLayer);
   }
@@ -324,8 +421,12 @@ function renderResults(dwell, fit = true) {
 
   results.slice(0, shownCount).forEach((ch, i) => {
     const title = chargerTitle(ch);
-    const kwh = ch.kw ? Math.round(ch.kw * dwell / 60) : null;
-    const slow = ch.kw && ch.kw < 22 && dwell <= 60;
+    const kwh = ch.effKw ? Math.round(ch.effKw * dwell / 60) : null;
+    const slow = ch.effKw && ch.effKw < 22 && dwell <= 60;
+    const bandInfo = SPEED_BANDS.find((b) => b.key === ch.band);
+    const speedPill = `<span class="speed-pill"><span class="swatch" style="background:${colours()[ch.band]}"></span>${bandInfo.label}${ch.effKw ? ` · ${ch.effKw} kW` : ''}</span>`;
+    // Connectors you can use (after the connector filter), each with its own power where known.
+    const plugs = ch.usable.map(([n, kw]) => (kw ? `${n} ${kw} kW` : n)).join(' · ');
     const counts = Object.entries(ch.perCat)
       .map(([k, n]) => `${CATEGORIES.find((x) => x.key === k).emoji} ${n >= cap ? `${cap}+` : n}`)
       .join(' &nbsp; ');
@@ -336,9 +437,7 @@ function renderResults(dwell, fit = true) {
     const metaBits = [
       mode === 'route' ? null : where,
       ch.op,
-      ch.kw ? `${ch.kw} kW` : 'power unknown',
       ch.pts ? `${ch.pts} ${ch.pts === 1 ? 'point' : 'points'}` : null,
-      (ch.sk || []).join(', '),
       ch.fee === 'no' ? 'free' : null,
       ch.acc === 'customers' ? 'customers only' : null,
       ch.mem ? 'membership / app needed' : null,
@@ -352,6 +451,7 @@ function renderResults(dwell, fit = true) {
     li.innerHTML = `
       <h3>${i + 1}. ${escapeHtml(title)}</h3>
       ${mode === 'route' ? `<div class="journey">${escapeHtml(where)}</div>` : ''}
+      <div>${speedPill}${plugs ? ` <span class="meta">· ${escapeHtml(plugs)}</span>` : ''}</div>
       <div class="meta">${escapeHtml(metaBits.join(' · '))}</div>
       ${ch.cost && ch.fee !== 'no' ? `<div class="meta">Cost: ${escapeHtml(ch.cost)}</div>` : ''}
       ${kwh ? `<div class="meta">Up to ~${kwh} kWh in ${dwell} min (car's own limit may be lower)</div>` : ''}
@@ -416,16 +516,17 @@ function setOrigin(origin) {
   L.marker([origin.lat, origin.lon]).bindTooltip('You').addTo(pinLayer);
 }
 
-let rapidBeforeRoute = false;
+let speedsBeforeRoute = null;
+const JOURNEY_SPEEDS = new Set(['rapid', 'ultra']);
 
 function setMode(m) {
   if (m === mode) return;
-  // On a journey you need range, so default to rapid chargers; restore the old choice on the way back.
+  // On a journey you need range, so default to rapid and ultra-rapid; restore the old choice on the way back.
   if (m === 'route') {
-    rapidBeforeRoute = $('rapid').checked;
-    $('rapid').checked = true;
-  } else {
-    $('rapid').checked = rapidBeforeRoute;
+    speedsBeforeRoute = checkedValues('speeds');
+    setSpeeds(JOURNEY_SPEEDS);
+  } else if (speedsBeforeRoute) {
+    setSpeeds(speedsBeforeRoute);
   }
   mode = m;
   $('mode-near').setAttribute('aria-selected', String(m === 'near'));
@@ -458,7 +559,9 @@ async function search(e) {
 
   const dwell = +$('dwell').value;
   const walkM = walkRadiusMeters(dwell);
-  const filters = { walkM, dwell, selectedKeys, rapidOnly: $('rapid').checked, needToilets: $('toilets').checked };
+  const speeds = checkedValues('speeds');
+  if (!speeds.size) return setStatus('Pick at least one charger speed.', true);
+  const filters = { walkM, dwell, selectedKeys, speeds, groups: checkedValues('connectors'), needToilets: $('toilets').checked };
   const labels = ACTIVITIES.filter((c) => selectedKeys.has(c.key)).map((c) => c.label.toLowerCase()).join(' / ');
   $('go').disabled = true;
 
@@ -515,7 +618,7 @@ async function searchRoute(filters, labels) {
   setStatus('Planning the route…');
   lastRoute = await getRoute(from, to);
   routeLayer.clearLayers();
-  L.polyline(lastRoute.coords, { color: '#2563eb', weight: 5, opacity: 0.7 }).addTo(routeLayer);
+  L.polyline(lastRoute.coords, { color: routeColour(), weight: 5, opacity: 0.55 }).addTo(routeLayer);
   pinLayer.clearLayers();
   L.marker([from.lat, from.lon]).bindTooltip('Start').addTo(pinLayer);
   L.marker([to.lat, to.lon]).bindTooltip('Destination').addTo(pinLayer);
@@ -545,7 +648,7 @@ async function searchRoute(filters, labels) {
   setStatus(results.length
     ? `Your route: ${trip}. ${results.length} of ${chargers.length} chargers within ${corridorM / 1000} km of it${span} have ${labels} within a ${walk}-min walk. All are on the map.`
     : chargers.length
-      ? `Your route: ${trip}. ${chargers.length} chargers within ${corridorM / 1000} km of it${span}, but none match. Try a longer stop, more activities, a wider detour${filters.rapidOnly ? ' or unticking Rapid only' : ''}.`
+      ? `Your route: ${trip}. ${chargers.length} chargers within ${corridorM / 1000} km of it${span}, but none match. Try a longer stop, more activities, a wider detour, or more charger speeds or connectors.`
       : `Your route: ${trip}. No chargers within ${corridorM / 1000} km of it${span}. Try a wider detour or a different stopping point.`);
 }
 

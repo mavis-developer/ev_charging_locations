@@ -92,11 +92,14 @@ def to_chargers(pois, ref):
 
         conns = [c for c in (p.get('Connections') or []) if c.get('StatusTypeID') not in EXCLUDED_STATUS]
         kw = max((c.get('PowerKW') or 0 for c in conns), default=0)
-        sockets = []
+        cx = {}  # connector name -> highest kW seen for it at this site
         for c in conns:
             name = CONNECTOR_NAMES.get(c.get('ConnectionTypeID')) or conn_titles.get(c.get('ConnectionTypeID'))
-            if name and name not in sockets and not name.startswith('Unknown'):
-                sockets.append(name)
+            if not name or name.startswith('Unknown'):
+                continue
+            ckw = round(c['PowerKW'], 1) if c.get('PowerKW') else None
+            prev = cx.get(name)
+            cx[name] = ckw if prev is None else (max(prev, ckw) if ckw else prev)
         points = p.get('NumberOfPoints') or sum(c.get('Quantity') or 1 for c in conns) or None
 
         op = operators.get(p.get('OperatorID'))
@@ -114,7 +117,7 @@ def to_chargers(pois, ref):
             'name': a.get('Title') or op,
             'op': op,
             'kw': round(kw, 1) if kw else None,
-            'sk': sockets,
+            'cx': [[n, k] for n, k in cx.items()],
             'pts': points,
             'cost': cost,
             'fee': 'no' if cost and re.match(r'^\s*free\b', cost, re.I) else None,

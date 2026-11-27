@@ -33,6 +33,10 @@ so a search takes well under a second.
 - **Ranking** (`rankChargers` in `app.js`): each place within the walk adds points. Closer and named places add more,
   and so does a mix of categories. Activities that don't suit the stop length (e.g. a cinema on a 20-min stop) count
   less. Chargers further from you get a small penalty.
+- **Speed and connector filters** work together per connector: the build keeps each connector's own power (`cx` in
+  the tiles), so "Type 2 + Rapid" excludes a site whose Type 2 is only 7 kW even if its CCS is 50 kW. Speed bands:
+  Slow under 7 kW, Fast 7–22, Rapid 25–99, Ultra-rapid 100+, Unknown. Dots are coloured by speed on a one-hue scale
+  (deeper/brighter = faster) checked for colour-blind safety against both grey map backgrounds.
 - **Distance to parks** is measured to the nearest point of the park's outline, not its centre.
 - **Place search** uses postcodes.io for UK postcodes and Nominatim (limited to the UK) for anything else.
 - **Journey mode** ("On a journey"): gets a driving route from a free OSRM server (routing.openstreetmap.de, with
