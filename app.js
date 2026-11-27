@@ -105,10 +105,107 @@ async function geocode(query) {
 }
 
 // ---------------------------------------------------------------------------
+// Journeys
+// ---------------------------------------------------------------------------
+// Free OSRM driving-route servers (no key). Tried in order.
+const ROUTERS = [
+  'https://routing.openstreetmap.de/routed-car/route/v1/driving',
+  'https://router.project-osrm.org/route/v1/driving',
+];
+const ROUTE_SAMPLE_M = 400;           // check chargers against a point every ~400 m of the route
+
+/** Driving route as { coords: [[lat, lon], …], distM, durS }. */
+async function getRoute(a, b) {
+  let lastErr;
+  for (const base of ROUTERS) {
+    try {
+      const r = await fetchJson(`${base}/${a.lon},${a.lat};${b.lon},${b.lat}?overview=full&geometries=geojson`);
+      if (r.code !== 'Ok' || !r.routes?.length) throw new Error(r.message || 'no route');
+      const rt = r.routes[0];
+      return { coords: rt.geometry.coordinates.map(([lon, lat]) => [lat, lon]), distM: rt.distance, durS: rt.duration };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw new Error(`Couldn't plan a driving route between those places (${lastErr.message}).`);
+}
+
+/** Points roughly every ROUTE_SAMPLE_M along the route, each with its distance from the start. */
+function sampleRoute(coords) {
+  const out = [{ lat: coords[0][0], lon: coords[0][1], m: 0 }];
+  let total = 0, sinceLast = 0;
+  for (let i = 1; i < coords.length; i++) {
+    const a = { lat: coords[i - 1][0], lon: coords[i - 1][1] };
+    const b = { lat: coords[i][0], lon: coords[i][1] };
+    const d = haversine(a, b);
+    total += d;
+    sinceLast += d;
+    if (sinceLast >= ROUTE_SAMPLE_M || i === coords.length - 1) {
+      out.push({ ...b, m: total });
+      sinceLast = 0;
+    }
+  }
+  return out;
+}
+
+/** Chargers within `corridorM` of the route, each with offRouteM and alongM (distance into the journey). */
+async function chargersAlongRoute(samples, corridorM) {
+  const deg = INDEX.tileDeg;
+  const pad = corridorM / 111320 * 1.7; // generous in longitude at UK latitudes
+  const keys = new Set();
+  for (const s of samples) {
+    for (let i = Math.floor((s.lat - pad) / deg); i <= Math.floor((s.lat + pad) / deg); i++) {
+      for (let j = Math.floor((s.lon - pad) / deg); j <= Math.floor((s.lon + pad) / deg); j++) {
+        if (INDEX.tiles[`${i}_${j}`]) keys.add(`${i}_${j}`);
+      }
+    }
+  }
+  const tiles = await Promise.all([...keys].map(loadTile));
+
+  // Bucket route samples on a grid so each charger only checks the route points near it.
+  const CELL = 0.05; // degrees (~5.5 km north-south)
+  const cellKey = (lat, lon) => `${Math.floor(lat / CELL)}:${Math.floor(lon / CELL)}`;
+  const grid = new Map();
+  for (const s of samples) {
+    const k = cellKey(s.lat, s.lon);
+    if (!grid.has(k)) grid.set(k, []);
+    grid.get(k).push(s);
+  }
+  const reach = Math.ceil(corridorM / 111320 / CELL * 1.7) + 1;
+
+  const out = [];
+  for (const c of tiles.flat()) {
+    const ci = Math.floor(c.lat / CELL), cj = Math.floor(c.lon / CELL);
+    let best = null, bestD = Infinity;
+    for (let di = -reach; di <= reach; di++) {
+      for (let dj = -reach; dj <= reach; dj++) {
+        for (const s of grid.get(`${ci + di}:${cj + dj}`) || []) {
+          const d = haversine(c, s);
+          if (d < bestD) { bestD = d; best = s; }
+        }
+      }
+    }
+    if (best && bestD <= corridorM) out.push({ ...c, offRouteM: bestD, alongM: best.m });
+  }
+  return out;
+}
+
+function formatDuration(s) {
+  const mins = Math.round(s / 60);
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60), m = mins % 60;
+  return m ? `${h} h ${m} min` : `${h} h`;
+}
+
+// ---------------------------------------------------------------------------
 // Ranking
 // ---------------------------------------------------------------------------
+/**
+ * Each charger needs `detourM`: how far out of your way it is (distance from you, or there-and-back
+ * off the route). `detourScale` sets how hard detours are penalised.
+ */
 function rankChargers(chargers, opts) {
-  const { walkM, dwell, selectedKeys, rapidOnly, needToilets } = opts;
+  const { walkM, dwell, selectedKeys, rapidOnly, needToilets, detourScale } = opts;
   const scored = [];
 
   for (const ch of chargers) {
@@ -132,7 +229,7 @@ function rankChargers(chargers, opts) {
       score += (0.4 + closeness) * (p.name ? 1 : 0.5) * fit / Math.sqrt(n);
     }
     score *= 1 + 0.25 * (Object.keys(perCat).length - 1);
-    score /= 1 + ch.distFromYou / 20000; // gentle penalty for detours
+    score /= 1 + ch.detourM / detourScale;
 
     scored.push({ ...ch, activities, perCat, hasToilets, score });
   }
@@ -177,11 +274,15 @@ const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches;
 (baseMaps[savedBase] || (prefersDark ? baseMaps['Dark grey'] : baseMaps['Light grey'])).addTo(map);
 L.control.layers(baseMaps, null, { position: 'topright' }).addTo(map);
 map.on('baselayerchange', (e) => { try { localStorage.setItem('basemap2', e.name); } catch { /* ignore */ } });
+const routeLayer = L.layerGroup().addTo(map);
 const chargerLayer = L.layerGroup().addTo(map);
 const placeLayer = L.layerGroup().addTo(map);
-let originMarker = null;
-let currentOrigin = null;
-let results = [];                     // every matching charger, best first
+const pinLayer = L.layerGroup().addTo(map);     // "You" / start / end markers
+let mode = 'near';                    // 'near' = around a place, 'route' = along a journey
+let currentOrigin = null;             // near mode: where you are
+let fromPoint = null;                 // route mode: start, when set from "My location"
+let lastRoute = null;                 // route mode: { coords, distM, durS }
+let results = [];                     // every matching charger, in the current sort order
 let shownCount = 0;                   // how many are listed (and drawn large) so far
 let lastWalkM = 0;
 let lastDwell = 0;
@@ -229,8 +330,11 @@ function renderResults(dwell, fit = true) {
       .map(([k, n]) => `${CATEGORIES.find((x) => x.key === k).emoji} ${n >= cap ? `${cap}+` : n}`)
       .join(' &nbsp; ');
     const named = ch.activities.filter((p) => p.name).slice(0, 4);
+    const where = mode === 'route'
+      ? `${Math.round(ch.alongM / 1000)} km into the journey (about ${formatDuration(lastRoute.durS * ch.alongM / lastRoute.distM)} of driving) · ${(ch.offRouteM / 1000).toFixed(1)} km off the route`
+      : `${(ch.distFromYou / 1000).toFixed(1)} km away`;
     const metaBits = [
-      `${(ch.distFromYou / 1000).toFixed(1)} km away`,
+      mode === 'route' ? null : where,
       ch.op,
       ch.kw ? `${ch.kw} kW` : 'power unknown',
       ch.pts ? `${ch.pts} ${ch.pts === 1 ? 'point' : 'points'}` : null,
@@ -247,6 +351,7 @@ function renderResults(dwell, fit = true) {
     li.className = 'card';
     li.innerHTML = `
       <h3>${i + 1}. ${escapeHtml(title)}</h3>
+      ${mode === 'route' ? `<div class="journey">${escapeHtml(where)}</div>` : ''}
       <div class="meta">${escapeHtml(metaBits.join(' · '))}</div>
       ${ch.cost && ch.fee !== 'no' ? `<div class="meta">Cost: ${escapeHtml(ch.cost)}</div>` : ''}
       ${kwh ? `<div class="meta">Up to ~${kwh} kWh in ${dwell} min (car's own limit may be lower)</div>` : ''}
@@ -268,11 +373,19 @@ function renderResults(dwell, fit = true) {
   more.textContent = `Show ${Math.min(PAGE_SIZE, left)} more (${left} left)`;
 
   renderMap();
-  if (fit && results.length) {
+  if (!fit) return;
+  if (mode === 'route' && lastRoute) {
+    map.fitBounds(L.latLngBounds(lastRoute.coords), { padding: [30, 30] });
+  } else if (results.length) {
     const bounds = L.latLngBounds(results.map((c) => [c.lat, c.lon]));
     bounds.extend([currentOrigin.lat, currentOrigin.lon]);
     map.fitBounds(bounds, { padding: [30, 30] });
   }
+}
+
+function applySort() {
+  const by = mode === 'route' ? $('sort').value : 'best';
+  results.sort(by === 'journey' ? (a, b) => a.alongM - b.alongM : (a, b) => b.score - a.score);
 }
 
 function focusCharger(i) {
@@ -299,8 +412,41 @@ function focusCharger(i) {
 
 function setOrigin(origin) {
   currentOrigin = origin;
-  if (originMarker) originMarker.remove();
-  originMarker = L.marker([origin.lat, origin.lon]).bindTooltip('You').addTo(map);
+  pinLayer.clearLayers();
+  L.marker([origin.lat, origin.lon]).bindTooltip('You').addTo(pinLayer);
+}
+
+let rapidBeforeRoute = false;
+
+function setMode(m) {
+  if (m === mode) return;
+  // On a journey you need range, so default to rapid chargers; restore the old choice on the way back.
+  if (m === 'route') {
+    rapidBeforeRoute = $('rapid').checked;
+    $('rapid').checked = true;
+  } else {
+    $('rapid').checked = rapidBeforeRoute;
+  }
+  mode = m;
+  $('mode-near').setAttribute('aria-selected', String(m === 'near'));
+  $('mode-route').setAttribute('aria-selected', String(m === 'route'));
+  $('near-fields').hidden = m !== 'near';
+  $('radius-field').hidden = m !== 'near';
+  $('route-fields').hidden = m !== 'route';
+  $('corridor-field').hidden = m !== 'route';
+  $('sort-field').hidden = true;     // shown once there are journey results
+  // Clear the other mode's results so the map never mixes the two.
+  results = [];
+  shownCount = 0;
+  lastRoute = null;
+  routeLayer.clearLayers();
+  chargerLayer.clearLayers();
+  placeLayer.clearLayers();
+  pinLayer.clearLayers();
+  $('results').innerHTML = '';
+  $('more').hidden = true;
+  setStatus('');
+  if (m === 'near' && currentOrigin) setOrigin(currentOrigin);
 }
 
 async function search(e) {
@@ -311,39 +457,96 @@ async function search(e) {
   if (!selectedKeys.size) return setStatus('Pick at least one activity.', true);
 
   const dwell = +$('dwell').value;
-  const radius = +$('radius').value;
   const walkM = walkRadiusMeters(dwell);
+  const filters = { walkM, dwell, selectedKeys, rapidOnly: $('rapid').checked, needToilets: $('toilets').checked };
+  const labels = ACTIVITIES.filter((c) => selectedKeys.has(c.key)).map((c) => c.label.toLowerCase()).join(' / ');
   $('go').disabled = true;
 
   try {
-    const placeText = $('place').value.trim();
-    if (placeText && placeText !== 'My location') {
-      setStatus('Finding place…');
-      setOrigin(await geocode(placeText));
+    if (mode === 'route') {
+      await searchRoute(filters, labels);
+    } else {
+      await searchNear(filters, labels);
     }
-    if (!currentOrigin) throw new Error('Enter a place or tap 📍 to use your location.');
-
-    setStatus('Loading chargers…');
-    const chargers = await chargersNear(currentOrigin, radius);
-    results = rankChargers(chargers, {
-      walkM, dwell, selectedKeys, rapidOnly: $('rapid').checked, needToilets: $('toilets').checked,
-    });
-    lastWalkM = walkM;
-    lastDwell = dwell;
-    shownCount = PAGE_SIZE;
-    renderResults(dwell);
-
-    const labels = ACTIVITIES.filter((c) => selectedKeys.has(c.key)).map((c) => c.label.toLowerCase());
-    setStatus(results.length
-      ? `${results.length} of ${chargers.length} chargers nearby have ${labels.join(' / ')} within a ${walkMins(walkM)}-min walk. Best first; all are on the map.`
-      : chargers.length
-        ? `${chargers.length} chargers nearby, but none with that within a ${walkMins(walkM)}-min walk. Try a longer stop or more activities.`
-        : 'No chargers found in this area. Try a bigger search area.');
   } catch (err) {
     setStatus(err.message, true);
   } finally {
     $('go').disabled = false;
   }
+}
+
+async function searchNear(filters, labels) {
+  const placeText = $('place').value.trim();
+  if (placeText && placeText !== 'My location') {
+    setStatus('Finding place…');
+    setOrigin(await geocode(placeText));
+  }
+  if (!currentOrigin) throw new Error('Enter a place or tap 📍 to use your location.');
+
+  setStatus('Loading chargers…');
+  const chargers = (await chargersNear(currentOrigin, +$('radius').value))
+    .map((c) => ({ ...c, detourM: c.distFromYou }));
+  results = rankChargers(chargers, { ...filters, detourScale: 20000 }); // gentle penalty for distance from you
+  lastWalkM = filters.walkM;
+  lastDwell = filters.dwell;
+  shownCount = PAGE_SIZE;
+  renderResults(filters.dwell);
+
+  const walk = walkMins(filters.walkM);
+  setStatus(results.length
+    ? `${results.length} of ${chargers.length} chargers nearby have ${labels} within a ${walk}-min walk. Best first; all are on the map.`
+    : chargers.length
+      ? `${chargers.length} chargers nearby, but none with that within a ${walk}-min walk. Try a longer stop or more activities.`
+      : 'No chargers found in this area. Try a bigger search area.');
+}
+
+async function searchRoute(filters, labels) {
+  const fromText = $('from').value.trim();
+  const toText = $('to').value.trim();
+  if (!fromText && !fromPoint) throw new Error('Enter where you\'re starting from, or tap 📍 to use your location.');
+  if (!toText) throw new Error('Enter where you\'re going.');
+
+  setStatus('Finding places…');
+  const [from, to] = await Promise.all([
+    fromPoint && fromText === 'My location' ? fromPoint : geocode(fromText),
+    geocode(toText),
+  ]);
+
+  setStatus('Planning the route…');
+  lastRoute = await getRoute(from, to);
+  routeLayer.clearLayers();
+  L.polyline(lastRoute.coords, { color: '#2563eb', weight: 5, opacity: 0.7 }).addTo(routeLayer);
+  pinLayer.clearLayers();
+  L.marker([from.lat, from.lon]).bindTooltip('Start').addTo(pinLayer);
+  L.marker([to.lat, to.lon]).bindTooltip('Destination').addTo(pinLayer);
+
+  setStatus('Loading chargers along the route…');
+  const corridorM = +$('corridor').value;
+  // Only the part of the journey where you want to stop (as fractions of the route's length).
+  const [startFrac, endFrac] = $('stop-at').value.split('-').map(Number);
+  const fromM = startFrac * lastRoute.distM, toM = endFrac * lastRoute.distM;
+  const stopWhen = $('stop-at').selectedOptions[0].textContent.toLowerCase();
+  const chargers = (await chargersAlongRoute(sampleRoute(lastRoute.coords), corridorM))
+    .filter((c) => c.alongM >= fromM && c.alongM <= toM)
+    .map((c) => ({ ...c, detourM: 2 * c.offRouteM })); // there and back
+  results = rankChargers(chargers, { ...filters, detourScale: 4000 }); // detours matter more on a journey
+  applySort();
+  lastWalkM = filters.walkM;
+  lastDwell = filters.dwell;
+  shownCount = PAGE_SIZE;
+  $('sort-field').hidden = !results.length;
+  renderResults(filters.dwell);
+
+  const trip = `${Math.round(lastRoute.distM / 1000)} km, about ${formatDuration(lastRoute.durS)} of driving`;
+  const span = endFrac - startFrac < 1
+    ? ` between ${Math.round(fromM / 1000)} and ${Math.round(toM / 1000)} km (${stopWhen})`
+    : '';
+  const walk = walkMins(filters.walkM);
+  setStatus(results.length
+    ? `Your route: ${trip}. ${results.length} of ${chargers.length} chargers within ${corridorM / 1000} km of it${span} have ${labels} within a ${walk}-min walk. All are on the map.`
+    : chargers.length
+      ? `Your route: ${trip}. ${chargers.length} chargers within ${corridorM / 1000} km of it${span}, but none match. Try a longer stop, more activities, a wider detour${filters.rapidOnly ? ' or unticking Rapid only' : ''}.`
+      : `Your route: ${trip}. No chargers within ${corridorM / 1000} km of it${span}. Try a wider detour or a different stopping point.`);
 }
 
 $('locate').addEventListener('click', () => {
@@ -360,7 +563,28 @@ $('locate').addEventListener('click', () => {
     { enableHighAccuracy: false, timeout: 10000 },
   );
 });
+$('locate-from').addEventListener('click', () => {
+  if (!navigator.geolocation) return setStatus('Location is not available in this browser.', true);
+  setStatus('Getting your location…');
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      fromPoint = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+      $('from').value = 'My location';
+      setStatus($('to').value.trim() ? '' : 'Now enter where you\'re going.');
+      if ($('to').value.trim()) search();
+    },
+    (err) => setStatus(`Couldn't get your location: ${err.message}`, true),
+    { enableHighAccuracy: false, timeout: 10000 },
+  );
+});
 $('place').addEventListener('input', () => { if ($('place').value !== 'My location') currentOrigin = null; });
+$('from').addEventListener('input', () => { if ($('from').value !== 'My location') fromPoint = null; });
+$('mode-near').addEventListener('click', () => setMode('near'));
+$('mode-route').addEventListener('click', () => setMode('route'));
+$('sort').addEventListener('change', () => {
+  applySort();
+  renderResults(lastDwell, false);
+});
 $('search').addEventListener('submit', search);
 $('more').addEventListener('click', () => {
   shownCount += PAGE_SIZE;

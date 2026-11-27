@@ -35,6 +35,10 @@ so a search takes well under a second.
   less. Chargers further from you get a small penalty.
 - **Distance to parks** is measured to the nearest point of the park's outline, not its centre.
 - **Place search** uses postcodes.io for UK postcodes and Nominatim (limited to the UK) for anything else.
+- **Journey mode** ("On a journey"): gets a driving route from a free OSRM server (routing.openstreetmap.de, with
+  router.project-osrm.org as backup), samples a point every ~400 m, and keeps chargers within 1/3/8 km of it in the
+  part of the trip you choose (around halfway by default). Detours count as there-and-back and are penalised harder
+  than in "Near a place". "Rapid only" switches on by default, since a slow charger adds little range on a trip.
 
 Activity categories live in `categories.json`, which both the build script and the app read. Adding a category
 there and rebuilding is all it takes.
@@ -72,5 +76,6 @@ The workflow in `.github/workflows/deploy.yml` runs on every push to `main`, eve
 
 - Filter places by `opening_hours` at the planned arrival time.
 - Live availability from operators' open data feeds (UK Public Charge Point Regulations 2023 require them).
-- Route mode: "find a stop around 150 km into my journey" instead of "near me".
+- Journey mode: tell apart motorway services for each direction (e.g. Reading Eastbound vs Westbound) so only the
+  side you can reach is shown.
 - Car profile (max charge rate, connector) for accurate time-to-80% estimates.

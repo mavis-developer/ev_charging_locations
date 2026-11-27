@@ -16,13 +16,41 @@
   <main>
     <aside id="panel">
       <form id="search">
-        <label class="field">
+        <div class="modes" role="tablist" aria-label="Search type">
+          <button type="button" role="tab" id="mode-near" aria-selected="true">Near a place</button>
+          <button type="button" role="tab" id="mode-route" aria-selected="false">On a journey</button>
+        </div>
+
+        <label class="field" id="near-fields">
           <span>Where are you?</span>
           <div class="row">
             <input id="place" type="text" placeholder="UK town, postcode or address" autocomplete="off">
             <button type="button" id="locate" title="Use my location">📍</button>
           </div>
         </label>
+
+        <div id="route-fields" hidden>
+          <label class="field">
+            <span>From</span>
+            <div class="row">
+              <input id="from" type="text" placeholder="Start: town, postcode or address" autocomplete="off">
+              <button type="button" id="locate-from" title="Start from my location">📍</button>
+            </div>
+          </label>
+          <label class="field">
+            <span>To</span>
+            <input id="to" type="text" placeholder="Destination" autocomplete="off">
+          </label>
+          <label class="field">
+            <span>When do you want to stop?</span>
+            <select id="stop-at">
+              <option value="0.3-0.7" selected>Around halfway</option>
+              <option value="0.1-0.45">Early in the journey</option>
+              <option value="0.55-0.9">Later in the journey</option>
+              <option value="0-1">Anywhere along the way</option>
+            </select>
+          </label>
+        </div>
 
         <label class="field">
           <span>How long will you stop?</span>
@@ -40,12 +68,20 @@
         </fieldset>
 
         <div class="field row-wrap">
-          <label class="field inline">
+          <label class="field inline" id="radius-field">
             <span>Search within</span>
             <select id="radius">
               <option value="5000">5 km</option>
               <option value="10000" selected>10 km</option>
               <option value="25000">25 km</option>
+            </select>
+          </label>
+          <label class="field inline" id="corridor-field" hidden>
+            <span>Off the route by up to</span>
+            <select id="corridor">
+              <option value="1000">1 km</option>
+              <option value="3000" selected>3 km</option>
+              <option value="8000">8 km</option>
             </select>
           </label>
           <label class="check"><input type="checkbox" id="rapid"> Rapid only (50 kW+)</label>
@@ -56,6 +92,13 @@
       </form>
 
       <div id="status" role="status"></div>
+      <label class="check sort" id="sort-field" hidden>
+        Sort
+        <select id="sort">
+          <option value="best" selected>Best match</option>
+          <option value="journey">In journey order</option>
+        </select>
+      </label>
       <ol id="results"></ol>
       <button type="button" id="more" hidden>Show more</button>
       <p id="updated" class="meta"></p>
