@@ -4,7 +4,7 @@
 // Categories (labels, emoji, minimum stop length) come from categories.json, shared with the build.
 
 const WALK_M_PER_MIN = 80;            // ~4.8 km/h
-const MAX_RESULTS = 25;
+const PAGE_SIZE = 25;                 // chargers listed at a time ("Show more" adds another page)
 
 let CATEGORIES = [];                  // all categories, index = category id used in tiles
 let ACTIVITIES = [];                  // categories offered as activities (not facilities)
@@ -135,13 +135,13 @@ function rankChargers(chargers, opts) {
     scored.push({ ...ch, activities, perCat, hasToilets, score });
   }
 
-  return scored.sort((a, b) => b.score - a.score).slice(0, MAX_RESULTS);
+  return scored.sort((a, b) => b.score - a.score);
 }
 
 // ---------------------------------------------------------------------------
 // Map + UI
 // ---------------------------------------------------------------------------
-const map = L.map('map').setView([54.5, -3], 6);
+const map = L.map('map', { preferCanvas: true }).setView([54.5, -3], 6); // canvas copes with thousands of dots
 L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
   attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
@@ -150,8 +150,10 @@ const chargerLayer = L.layerGroup().addTo(map);
 const placeLayer = L.layerGroup().addTo(map);
 let originMarker = null;
 let currentOrigin = null;
-let results = [];
+let results = [];                     // every matching charger, best first
+let shownCount = 0;                   // how many are listed (and drawn large) so far
 let lastWalkM = 0;
+let lastDwell = 0;
 
 function renderChips() {
   $('activities').innerHTML = ACTIVITIES.map((c, i) => `
@@ -164,15 +166,32 @@ function setStatus(msg, isError = false) {
   $('status').className = isError ? 'error' : '';
 }
 
-function renderResults(dwell) {
+const chargerTitle = (ch) => ch.name || 'EV charger';
+
+/** Every matching charger goes on the map; the ones listed so far are big, the rest small dots. */
+function renderMap() {
   chargerLayer.clearLayers();
+  // Draw the unlisted dots first so the listed (bigger) markers sit on top.
+  for (let i = results.length - 1; i >= 0; i--) {
+    const ch = results[i];
+    const listed = i < shownCount;
+    L.circleMarker([ch.lat, ch.lon], listed
+      ? { radius: 9, color: '#0b8a5f', weight: 2, fillColor: '#2fbf87', fillOpacity: 0.9 }
+      : { radius: 5, color: '#0b8a5f', weight: 1, fillColor: '#2fbf87', fillOpacity: 0.45 })
+      .bindTooltip(`${i + 1}. ${escapeHtml(chargerTitle(ch))}`)
+      .on('click', () => focusCharger(i))
+      .addTo(chargerLayer);
+  }
+}
+
+function renderResults(dwell, fit = true) {
   placeLayer.clearLayers();
   const list = $('results');
   list.innerHTML = '';
   const cap = INDEX.perCatCap;
 
-  results.forEach((ch, i) => {
-    const title = ch.name || 'EV charger';
+  results.slice(0, shownCount).forEach((ch, i) => {
+    const title = chargerTitle(ch);
     const kwh = ch.kw ? Math.round(ch.kw * dwell / 60) : null;
     const slow = ch.kw && ch.kw < 22 && dwell <= 60;
     const counts = Object.entries(ch.perCat)
@@ -210,16 +229,15 @@ function renderResults(dwell) {
       </div>`;
     li.addEventListener('click', (e) => { if (e.target.tagName !== 'A') focusCharger(i); });
     list.appendChild(li);
-
-    L.circleMarker([ch.lat, ch.lon], {
-      radius: 9, color: '#0b8a5f', weight: 2, fillColor: '#2fbf87', fillOpacity: 0.85,
-    })
-      .bindTooltip(`${i + 1}. ${escapeHtml(title)}`)
-      .on('click', () => focusCharger(i))
-      .addTo(chargerLayer);
   });
 
-  if (results.length) {
+  const more = $('more');
+  const left = results.length - shownCount;
+  more.hidden = left <= 0;
+  more.textContent = `Show ${Math.min(PAGE_SIZE, left)} more (${left} left)`;
+
+  renderMap();
+  if (fit && results.length) {
     const bounds = L.latLngBounds(results.map((c) => [c.lat, c.lon]));
     bounds.extend([currentOrigin.lat, currentOrigin.lon]);
     map.fitBounds(bounds, { padding: [30, 30] });
@@ -227,6 +245,10 @@ function renderResults(dwell) {
 }
 
 function focusCharger(i) {
+  if (i >= shownCount) {               // clicked a small dot: extend the list down to it
+    shownCount = Math.ceil((i + 1) / PAGE_SIZE) * PAGE_SIZE;
+    renderResults(lastDwell, false);
+  }
   const ch = results[i];
   const cards = document.querySelectorAll('.card');
   cards.forEach((el, j) => el.classList.toggle('active', i === j));
@@ -276,11 +298,13 @@ async function search(e) {
       walkM, dwell, selectedKeys, rapidOnly: $('rapid').checked, needToilets: $('toilets').checked,
     });
     lastWalkM = walkM;
+    lastDwell = dwell;
+    shownCount = PAGE_SIZE;
     renderResults(dwell);
 
     const labels = ACTIVITIES.filter((c) => selectedKeys.has(c.key)).map((c) => c.label.toLowerCase());
     setStatus(results.length
-      ? `Top ${results.length} of ${chargers.length} chargers nearby with ${labels.join(' / ')} within a ${walkMins(walkM)}-min walk.`
+      ? `${results.length} of ${chargers.length} chargers nearby have ${labels.join(' / ')} within a ${walkMins(walkM)}-min walk. Best first; all are on the map.`
       : chargers.length
         ? `${chargers.length} chargers nearby, but none with that within a ${walkMins(walkM)}-min walk. Try a longer stop or more activities.`
         : 'No chargers found in this area. Try a bigger search area.');
@@ -307,6 +331,10 @@ $('locate').addEventListener('click', () => {
 });
 $('place').addEventListener('input', () => { if ($('place').value !== 'My location') currentOrigin = null; });
 $('search').addEventListener('submit', search);
+$('more').addEventListener('click', () => {
+  shownCount += PAGE_SIZE;
+  renderResults(lastDwell, false);
+});
 
 loadMeta()
   .then(() => {

@@ -35,6 +35,7 @@ FACILITY_CAP = 3      # nearest N toilets kept per charger
 TILE_DEG = 0.5        # output tile size (~55 km north-south)
 GRID_DEG = 0.01       # spatial index cell size (~1 km)
 DEDUPE_M = 25         # OSM charger points closer than this are merged into one site
+OCM_DEDUPE_M = 30     # Open Charge Map entries closer than this are one site (often listed per operator/floor)
 MERGE_M = 50          # an OSM charger this close to an Open Charge Map site is the same site
 AREA_SAMPLES = 24     # outline points kept for big areas (parks), so distance is to the edge
 SMALL_AREA_M = 150    # areas smaller than this are treated as a single point
@@ -180,7 +181,7 @@ def cell(lat, lon):
     return (math.floor(lat / GRID_DEG), math.floor(lon / GRID_DEG))
 
 
-def dedupe_chargers(chargers):
+def dedupe_chargers(chargers, radius=DEDUPE_M):
     """Merge charger points within DEDUPE_M of each other (OSM often maps one site several times)."""
     # Prefer entries with more information as the surviving record.
     chargers.sort(key=lambda c: (c['kw'] is None, c['name'] is None, -len(c['sk'])))
@@ -192,7 +193,7 @@ def dedupe_chargers(chargers):
         for di in (-1, 0, 1):
             for dj in (-1, 0, 1):
                 for k in grid[(ci + di, cj + dj)]:
-                    if haversine(c['lat'], c['lon'], k['lat'], k['lon']) <= DEDUPE_M:
+                    if haversine(c['lat'], c['lon'], k['lat'], k['lon']) <= radius:
                         match = k
                         break
                 if match:
@@ -205,6 +206,19 @@ def dedupe_chargers(chargers):
             match['sk'] += [s for s in c['sk'] if s not in match['sk']]
             match['name'] = match['name'] or c['name']
             match['wc'] = match['wc'] or c['wc']
+            # Several operators at one site (e.g. Tesla + InstaVolt at services): list them all.
+            if c.get('op') and c['op'] not in (match.get('op') or ''):
+                match['op'] = '%s, %s' % (match['op'], c['op']) if match.get('op') else c['op']
+            if c.get('pts'):
+                match['pts'] = (match.get('pts') or 0) + c['pts']
+            match['cost'] = match.get('cost') or c.get('cost')
+            # The site is open to everyone if any entry there is.
+            if not c.get('acc'):
+                match['acc'] = None
+            if not c.get('mem'):
+                match['mem'] = False
+            if match.get('fee') == 'no' and c.get('fee') != 'no':
+                match['fee'] = c.get('fee')  # only "free" if every entry there is free
         else:
             grid[(ci, cj)].append(c)
             kept.append(c)
@@ -346,7 +360,10 @@ def main():
         print('Fetching Open Charge Map UK data …', flush=True)
         pois, ref = ocm.load_or_fetch(key, args.ocm_cache)
         ocm_chargers, ocm_attr = ocm.to_chargers(pois, ref)
-        print('  %d Open Charge Map sites usable (of %d)' % (len(ocm_chargers), len(pois)), flush=True)
+        usable = len(ocm_chargers)
+        ocm_chargers = dedupe_chargers(ocm_chargers, OCM_DEDUPE_M)
+        print('  %d Open Charge Map entries usable (of %d) -> %d sites after merging same-site entries'
+              % (usable, len(pois), len(ocm_chargers)), flush=True)
         chargers, merged, extra = merge_sources(ocm_chargers, osm_chargers)
         print('  %d OSM sites matched an OCM site; %d OSM-only sites added; %d total' % (merged, extra, len(chargers)), flush=True)
         sources = {'ocm': len(ocm_chargers), 'osmOnly': extra}
