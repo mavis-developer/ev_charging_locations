@@ -11,14 +11,19 @@ and it ranks nearby chargers by what's within a short walk.
 There's no live server. A GitHub Action rebuilds the data every week and publishes it with the site on GitHub Pages:
 
 ```
-Geofabrik UK extract (.osm.pbf, ~2.3 GB)
-  └─ scripts/build_data.py
-       ├─ picks out public chargers + places (cafés, parks, museums… per categories.json)
-       ├─ merges duplicate charger points within 25 m
+Open Charge Map API (UK, open-licensed)  ─┐
+Geofabrik UK extract (.osm.pbf, ~2.3 GB) ─┤
+  └─ scripts/build_data.py (+ scripts/ocm.py)
+       ├─ chargers: Open Charge Map is the main source (removed / planned / private sites skipped);
+       │   OSM chargers within 50 m of an OCM site fill its gaps, the rest are added as extra sites
+       ├─ places (cafés, parks, museums… per categories.json) from OSM
        ├─ for each charger, keeps the 10 nearest places per category within 1.2 km
        └─ writes data/index.json + data/tiles/<i>_<j>.json  (0.5° squares)
   └─ GitHub Pages serves index.html, app.js, categories.json and data/
 ```
+
+Open Charge Map needs a free API key (openchargemap.org → sign in → My profile → My Apps → Register an application).
+It's stored as the repo secret `OCM_API_KEY`. Without it, the build falls back to OpenStreetMap chargers only.
 
 In the browser, the app loads only the 1–4 tiles that overlap your search area, then filters and ranks locally,
 so a search takes well under a second.
@@ -41,7 +46,8 @@ python3 -m venv .venv && .venv/bin/pip install osmium
 
 # Small test area (~50 MB, builds in seconds). Use united-kingdom-latest.osm.pbf for everything.
 curl -L -o somerset.osm.pbf https://download.geofabrik.de/europe/united-kingdom/england/somerset-latest.osm.pbf
-.venv/bin/python scripts/build_data.py somerset.osm.pbf data
+export OCM_API_KEY=your-key   # optional; --ocm-cache avoids re-downloading on repeat runs
+.venv/bin/python scripts/build_data.py somerset.osm.pbf data --ocm-cache ocm-gb.json
 
 python3 -m http.server 8000   # open http://localhost:8000
 ```
@@ -53,7 +59,11 @@ The workflow in `.github/workflows/deploy.yml` runs on every push to `main`, eve
 
 ## Known limitations
 
-- **OSM charger data is incomplete.** Power ratings are often missing, and there's no live availability or pricing.
+- **No live availability.** Open Charge Map and OSM say where chargers are, not whether they're free right now.
+- **Some records are old.** Open Charge Map entries can be years since last verified; the build skips ones marked
+  removed or not operational, but can't catch everything.
+- **Licensing:** the build requests `opendata=true` from Open Charge Map, and the page shows each data provider's
+  attribution as its licence requires.
 - **Data is up to a week old.** Fine for chargers and cafés, which rarely move.
 - **No opening hours check.** A café that's closed at 7pm still counts.
 - **UK only** for now. Other countries need their Geofabrik extract added to the workflow.
@@ -61,6 +71,6 @@ The workflow in `.github/workflows/deploy.yml` runs on every push to `main`, eve
 ## Next steps
 
 - Filter places by `opening_hours` at the planned arrival time.
-- Better charger data (power, live availability) from Open Charge Map or a commercial feed, merged in at build time.
+- Live availability from operators' open data feeds (UK Public Charge Point Regulations 2023 require them).
 - Route mode: "find a stop around 150 km into my journey" instead of "near me".
 - Car profile (max charge rate, connector) for accurate time-to-80% estimates.

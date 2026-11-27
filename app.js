@@ -181,23 +181,33 @@ function renderResults(dwell) {
     const named = ch.activities.filter((p) => p.name).slice(0, 4);
     const metaBits = [
       `${(ch.distFromYou / 1000).toFixed(1)} km away`,
+      ch.op,
       ch.kw ? `${ch.kw} kW` : 'power unknown',
+      ch.pts ? `${ch.pts} ${ch.pts === 1 ? 'point' : 'points'}` : null,
       (ch.sk || []).join(', '),
       ch.fee === 'no' ? 'free' : null,
       ch.acc === 'customers' ? 'customers only' : null,
+      ch.mem ? 'membership / app needed' : null,
     ].filter(Boolean);
+    const sourceLink = ch.src === 'ocm'
+      ? `<a href="https://openchargemap.org/site/poi/details/${ch.id.slice(3)}" target="_blank" rel="noopener">Charger details ↗</a>`
+      : `<a href="https://www.openstreetmap.org/${{ n: 'node', w: 'way', r: 'relation' }[ch.id[0]]}/${ch.id.slice(1)}" target="_blank" rel="noopener">Charger details ↗</a>`;
 
     const li = document.createElement('li');
     li.className = 'card';
     li.innerHTML = `
       <h3>${i + 1}. ${escapeHtml(title)}</h3>
       <div class="meta">${escapeHtml(metaBits.join(' · '))}</div>
+      ${ch.cost && ch.fee !== 'no' ? `<div class="meta">Cost: ${escapeHtml(ch.cost)}</div>` : ''}
       ${kwh ? `<div class="meta">Up to ~${kwh} kWh in ${dwell} min (car's own limit may be lower)</div>` : ''}
       ${slow ? `<div class="warn">Slow charger: you won't get much range in this time.</div>` : ''}
       <div class="counts">${counts}${ch.hasToilets ? ' &nbsp; 🚻' : ''}</div>
       ${named.length ? `<ul class="places">${named.map((p) =>
         `<li>${p.cat.emoji} ${escapeHtml(p.name)} <span class="meta">· ${walkMins(p.dist)} min walk</span></li>`).join('')}</ul>` : ''}
-      <a href="https://www.google.com/maps/dir/?api=1&destination=${ch.lat},${ch.lon}" target="_blank" rel="noopener">Directions ↗</a>`;
+      <div class="links">
+        <a href="https://www.google.com/maps/dir/?api=1&destination=${ch.lat},${ch.lon}" target="_blank" rel="noopener">Directions ↗</a>
+        ${sourceLink}
+      </div>`;
     li.addEventListener('click', (e) => { if (e.target.tagName !== 'A') focusCharger(i); });
     list.appendChild(li);
 
@@ -301,6 +311,11 @@ $('search').addEventListener('submit', search);
 loadMeta()
   .then(() => {
     renderChips();
-    if (INDEX) $('updated').textContent = `Charger data: OpenStreetMap, updated ${INDEX.built.slice(0, 10)} · ${INDEX.chargers.toLocaleString()} UK sites`;
+    if (INDEX) {
+      const credits = (INDEX.attribution || [{ name: 'OpenStreetMap contributors', licence: 'ODbL 1.0' }])
+        .map((a) => `${a.name}${a.licence ? ` (${a.licence.length > 60 ? `${a.licence.slice(0, 57)}…` : a.licence})` : ''}`);
+      $('updated').textContent = `${INDEX.chargers.toLocaleString()} UK charger sites, updated ${INDEX.built.slice(0, 10)}. `
+        + `Data: ${credits.join('; ')}. Places: OpenStreetMap contributors.`;
+    }
   })
   .catch((err) => setStatus(`Couldn't load the app data: ${err.message}`, true));

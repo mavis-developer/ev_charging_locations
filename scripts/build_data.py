@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Pre-compute EV chargers and the things to do near each one from an OpenStreetMap extract.
+"""Pre-compute EV chargers and the things to do near each one.
 
-Writes small JSON "tiles" (TILE_DEG x TILE_DEG squares) so the web app can load just the
-area around the user instead of querying a live service.
+Chargers come from Open Charge Map (main source, needs OCM_API_KEY) plus OpenStreetMap
+(fills gaps). Places to visit come from OpenStreetMap. Writes small JSON "tiles"
+(TILE_DEG x TILE_DEG squares) so the web app loads just the area around the user.
 
 Usage:
-    python scripts/build_data.py united-kingdom-latest.osm.pbf data/
+    OCM_API_KEY=... python scripts/build_data.py united-kingdom-latest.osm.pbf data/
+    (without OCM_API_KEY the build uses OpenStreetMap chargers only)
 
 Output:
     data/index.json            build date, settings, list of tiles
@@ -23,6 +25,8 @@ from collections import defaultdict
 
 import osmium
 
+import ocm
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 MAX_WALK_M = 1200     # longest one-way walk the app uses (walkRadiusMeters in app.js)
@@ -30,7 +34,8 @@ PER_CAT_CAP = 10      # nearest N places kept per activity category per charger
 FACILITY_CAP = 3      # nearest N toilets kept per charger
 TILE_DEG = 0.5        # output tile size (~55 km north-south)
 GRID_DEG = 0.01       # spatial index cell size (~1 km)
-DEDUPE_M = 25         # charger points closer than this are merged into one site
+DEDUPE_M = 25         # OSM charger points closer than this are merged into one site
+MERGE_M = 50          # an OSM charger this close to an Open Charge Map site is the same site
 AREA_SAMPLES = 24     # outline points kept for big areas (parks), so distance is to the edge
 SMALL_AREA_M = 150    # areas smaller than this are treated as a single point
 
@@ -147,8 +152,9 @@ def read_osm(path, cat_lookup, keys):
             t = {tag.k: tag.v for tag in tags}
             (lat, lon), _ = summarise_points(pts)
             chargers.append({
-                'id': oid, 'lat': lat, 'lon': lon,
+                'id': oid, 'src': 'osm', 'lat': lat, 'lon': lon,
                 'name': t.get('name') or t.get('operator') or t.get('network') or t.get('brand'),
+                'op': t.get('operator') or t.get('network') or t.get('brand'),
                 'kw': max_power_kw(t),
                 'sk': socket_types(t),
                 'fee': t.get('fee'),
@@ -205,6 +211,34 @@ def dedupe_chargers(chargers):
     return kept
 
 
+def merge_sources(ocm_chargers, osm_chargers):
+    """Open Charge Map sites win; an OSM charger within MERGE_M of one fills in its gaps,
+    otherwise it's kept as an extra site OCM doesn't know about."""
+    grid = defaultdict(list)
+    for c in ocm_chargers:
+        grid[cell(c['lat'], c['lon'])].append(c)
+    extra, merged = [], 0
+    for o in osm_chargers:
+        ci, cj = cell(o['lat'], o['lon'])
+        best, best_d = None, MERGE_M
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                for c in grid.get((ci + di, cj + dj), ()):
+                    d = haversine(o['lat'], o['lon'], c['lat'], c['lon'])
+                    if d <= best_d:
+                        best, best_d = c, d
+        if best is None:
+            extra.append(o)
+            continue
+        merged += 1
+        for k in ('kw', 'name', 'op', 'fee'):
+            if not best.get(k) and o.get(k):
+                best[k] = o[k]
+        best['sk'] += [s for s in o['sk'] if s not in best['sk']]
+        best['wc'] = best['wc'] or o['wc']
+    return ocm_chargers + extra, merged, len(extra)
+
+
 def attach_nearby(chargers, places, cats):
     """For each charger, find the nearest places per category within MAX_WALK_M."""
     grid = defaultdict(list)
@@ -240,7 +274,7 @@ def attach_nearby(chargers, places, cats):
         c['near'] = near
 
 
-def write_tiles(chargers, places, out_dir, source):
+def write_tiles(chargers, places, out_dir, source, sources, attribution):
     tiles = defaultdict(list)
     for c in chargers:
         tiles['%d_%d' % (math.floor(c['lat'] / TILE_DEG), math.floor(c['lon'] / TILE_DEG))].append(c)
@@ -261,7 +295,9 @@ def write_tiles(chargers, places, out_dir, source):
                     out_places.append([round(p['lat'], 5), round(p['lon'], 5), p['cat'], p['name']])
                 near.append([local[pi], d])
             rec = {'id': c['id'], 'lat': round(c['lat'], 5), 'lon': round(c['lon'], 5), 'near': near}
-            for k in ('name', 'kw', 'sk', 'fee', 'acc', 'wc'):
+            if c.get('op') == c.get('name'):
+                c['op'] = None
+            for k in ('src', 'name', 'op', 'kw', 'sk', 'pts', 'cost', 'fee', 'acc', 'mem', 'wc'):
                 if c.get(k):
                     rec[k] = c[k]
             out_chargers.append(rec)
@@ -277,6 +313,8 @@ def write_tiles(chargers, places, out_dir, source):
         'maxWalkM': MAX_WALK_M,
         'perCatCap': PER_CAT_CAP,
         'chargers': len(chargers),
+        'sources': sources,
+        'attribution': attribution,
         'tiles': {k: len(v) for k, v in sorted(tiles.items())},
     }
     with open(os.path.join(out_dir, 'index.json'), 'w', encoding='utf-8') as f:
@@ -289,22 +327,41 @@ def main():
     ap.add_argument('pbf', help='OpenStreetMap extract (.osm.pbf), e.g. from download.geofabrik.de')
     ap.add_argument('out_dir', help='output directory, e.g. data/')
     ap.add_argument('--source', default=None, help='source label stored in index.json')
+    ap.add_argument('--ocm-cache', default=None,
+                    help='save/reuse Open Charge Map data here (reused if under 24h old), for local re-runs')
     args = ap.parse_args()
 
     t0 = time.time()
     cats, lookup, keys = load_categories()
     print('Reading %s …' % args.pbf, flush=True)
-    chargers, places = read_osm(args.pbf, lookup, keys)
-    print('  %d charger points, %d places (%.0fs)' % (len(chargers), len(places), time.time() - t0), flush=True)
+    osm_chargers, places = read_osm(args.pbf, lookup, keys)
+    print('  %d OSM charger points, %d places (%.0fs)' % (len(osm_chargers), len(places), time.time() - t0), flush=True)
 
-    chargers = dedupe_chargers(chargers)
-    print('  %d charger sites after merging duplicates' % len(chargers), flush=True)
+    osm_chargers = dedupe_chargers(osm_chargers)
+    print('  %d OSM charger sites after merging duplicates' % len(osm_chargers), flush=True)
+
+    attribution = [{'name': 'OpenStreetMap contributors', 'licence': 'ODbL 1.0'}]
+    key = os.environ.get('OCM_API_KEY', '').strip()
+    if key:
+        print('Fetching Open Charge Map UK data …', flush=True)
+        pois, ref = ocm.load_or_fetch(key, args.ocm_cache)
+        ocm_chargers, ocm_attr = ocm.to_chargers(pois, ref)
+        print('  %d Open Charge Map sites usable (of %d)' % (len(ocm_chargers), len(pois)), flush=True)
+        chargers, merged, extra = merge_sources(ocm_chargers, osm_chargers)
+        print('  %d OSM sites matched an OCM site; %d OSM-only sites added; %d total' % (merged, extra, len(chargers)), flush=True)
+        sources = {'ocm': len(ocm_chargers), 'osmOnly': extra}
+        attribution = [{'name': 'Open Charge Map: ' + a['name'], 'licence': a['licence']} for a in ocm_attr] + attribution
+    else:
+        print('OCM_API_KEY not set: using OpenStreetMap chargers only', flush=True)
+        chargers = osm_chargers
+        sources = {'ocm': 0, 'osmOnly': len(chargers)}
 
     attach_nearby(chargers, places, cats)
     with_any = sum(1 for c in chargers if c['near'])
     print('  %d sites have something within %d m (%.0fs)' % (with_any, MAX_WALK_M, time.time() - t0), flush=True)
 
-    n_tiles, size = write_tiles(chargers, places, args.out_dir, args.source or os.path.basename(args.pbf))
+    n_tiles, size = write_tiles(chargers, places, args.out_dir, args.source or os.path.basename(args.pbf),
+                                sources, attribution)
     print('Wrote %d tiles, %.1f MB total, to %s (%.0fs)' % (n_tiles, size / 1e6, args.out_dir, time.time() - t0))
 
 

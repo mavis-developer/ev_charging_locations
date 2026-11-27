@@ -110,6 +110,8 @@ button {
 .places { margin: 4px 0 0; padding-left: 18px; font-size: 13px; }
 .places li { margin: 1px 0; }
 .card a { color: var(--accent); font-size: 13px; }
+.links { display: flex; gap: 14px; margin-top: 6px; }
+#updated { margin-top: 16px; line-height: 1.4; }
 
 @media (max-width: 760px) {
   main { flex-direction: column-reverse; }

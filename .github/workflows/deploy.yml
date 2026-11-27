@@ -46,7 +46,11 @@ jobs:
       - name: Download UK OpenStreetMap extract
         run: test -f uk.osm.pbf || curl -fsSL -o uk.osm.pbf https://download.geofabrik.de/europe/united-kingdom-latest.osm.pbf
 
+      # OCM_API_KEY is a repo secret (Settings → Secrets and variables → Actions).
+      # Without it the build still works, using OpenStreetMap chargers only.
       - name: Build charger tiles
+        env:
+          OCM_API_KEY: ${{ secrets.OCM_API_KEY }}
         run: python scripts/build_data.py uk.osm.pbf site/data --source "OpenStreetMap UK (Geofabrik)"
 
       - name: Assemble site
