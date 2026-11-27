@@ -54,8 +54,14 @@ jobs:
           OCM_API_KEY: ${{ secrets.OPEN_CHARGE_MAP_NOV_2026 }}
         run: python scripts/build_data.py uk.osm.pbf site/data --source "OpenStreetMap UK (Geofabrik)"
 
+      # Version the script/style links with the commit, so browsers fetch new code straight after
+      # a deploy instead of reusing their cached copy (GitHub Pages lets browsers cache for 10 min).
       - name: Assemble site
-        run: cp index.html app.js style.css categories.json site/
+        run: |
+          cp index.html app.js style.css categories.json site/
+          v="${GITHUB_SHA::7}"
+          sed -i -e "s|src=\"app.js\"|src=\"app.js?v=$v\"|" -e "s|href=\"style.css\"|href=\"style.css?v=$v\"|" site/index.html
+          grep -q "app.js?v=$v" site/index.html && grep -q "style.css?v=$v" site/index.html
 
       - uses: actions/configure-pages@v5
 

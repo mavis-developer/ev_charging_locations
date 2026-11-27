@@ -38,18 +38,19 @@ const walkMins = (m) => Math.max(1, Math.round(m / WALK_M_PER_MIN));
 // ---------------------------------------------------------------------------
 // Data loading
 // ---------------------------------------------------------------------------
-async function fetchJson(url) {
-  const res = await fetch(url);
+async function fetchJson(url, options) {
+  const res = await fetch(url, options);
   if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
   return res.json();
 }
 
 async function loadMeta() {
-  const cats = await fetchJson('categories.json');
+  // 'no-cache' = always check with the server for a newer copy (small files, so cheap).
+  const cats = await fetchJson('categories.json', { cache: 'no-cache' });
   CATEGORIES = cats.categories;
   ACTIVITIES = CATEGORIES.filter((c) => !c.facility);
   try {
-    INDEX = await fetchJson('data/index.json');
+    INDEX = await fetchJson('data/index.json', { cache: 'no-cache' });
   } catch {
     INDEX = null;
   }
@@ -57,7 +58,8 @@ async function loadMeta() {
 
 function loadTile(key) {
   if (!tileCache.has(key)) {
-    const p = fetchJson(`data/tiles/${key}.json`).then((tile) => {
+    // ?v=<build time> so a new weekly build never mixes with cached tiles from the last one.
+    const p = fetchJson(`data/tiles/${key}.json?v=${encodeURIComponent(INDEX.built)}`).then((tile) => {
       const places = tile.places.map(([lat, lon, ci, name]) => ({ lat, lon, cat: CATEGORIES[ci], name }));
       return tile.chargers.map((c) => ({
         ...c,
