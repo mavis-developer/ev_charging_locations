@@ -142,22 +142,35 @@ function rankChargers(chargers, opts) {
 // Map + UI
 // ---------------------------------------------------------------------------
 const map = L.map('map', { preferCanvas: true }).setView([54.5, -3], 6); // canvas copes with thousands of dots
-// Base maps: CARTO styles (free, no key) drawn from OpenStreetMap data, plus the standard OSM style.
+// Base maps: Esri tiles (no key needed; checked Nov 2026 by looking at the actual tiles; CARTO
+// started returning "API key required" images) plus the standard OSM style.
+// The grey "Canvas" styles carry no labels, so each is paired with its matching label layer.
 const OSM_CREDIT = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
-const carto = (style) => L.tileLayer(`https://{s}.basemaps.cartocdn.com/${style}/{z}/{x}/{y}{r}.png`, {
-  maxZoom: 20, subdomains: 'abcd',
-  attribution: `${OSM_CREDIT} &copy; <a href="https://carto.com/attributions">CARTO</a>`,
-});
+const ESRI_CREDIT = 'Powered by <a href="https://www.esri.com">Esri</a> | Sources: Esri, HERE, Garmin, USGS, ' + OSM_CREDIT;
+const esri = (service, opts = {}) => L.tileLayer(
+  `https://server.arcgisonline.com/ArcGIS/rest/services/${service}/MapServer/tile/{z}/{y}/{x}`,
+  { maxZoom: 19, maxNativeZoom: 19, attribution: ESRI_CREDIT, ...opts },
+);
 const baseMaps = {
-  Voyager: carto('rastertiles/voyager'),
-  Light: carto('light_all'),
-  Dark: carto('dark_all'),
+  Streets: esri('World_Street_Map'),
+  Light: L.layerGroup([
+    esri('Canvas/World_Light_Gray_Base', { maxNativeZoom: 16 }),
+    esri('Canvas/World_Light_Gray_Reference', { maxNativeZoom: 16 }),
+  ]),
+  Dark: L.layerGroup([
+    esri('Canvas/World_Dark_Gray_Base', { maxNativeZoom: 16 }),
+    esri('Canvas/World_Dark_Gray_Reference', { maxNativeZoom: 16 }),
+  ]),
+  Satellite: L.layerGroup([
+    esri('World_Imagery', { attribution: 'Imagery: Esri, Maxar, Earthstar Geographics' }),
+    esri('Reference/World_Boundaries_and_Places'),
+  ]),
   OpenStreetMap: L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: OSM_CREDIT }),
 };
 let savedBase = null;
 try { savedBase = localStorage.getItem('basemap'); } catch { /* storage blocked */ }
 const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches;
-(baseMaps[savedBase] || (prefersDark ? baseMaps.Dark : baseMaps.Voyager)).addTo(map);
+(baseMaps[savedBase] || (prefersDark ? baseMaps.Dark : baseMaps.Streets)).addTo(map);
 L.control.layers(baseMaps, null, { position: 'topright' }).addTo(map);
 map.on('baselayerchange', (e) => { try { localStorage.setItem('basemap', e.name); } catch { /* ignore */ } });
 const chargerLayer = L.layerGroup().addTo(map);
