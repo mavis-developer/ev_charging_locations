@@ -1,0 +1,12 @@
+{
+  "_comment": "Activity categories, shared by scripts/build_data.py (OSM tag matching) and app.js (labels, scoring). minDwell = shortest stop in minutes the activity suits. facility = shown as an extra, not an activity.",
+  "categories": [
+    { "key": "coffee",   "label": "Coffee",        "emoji": "☕", "minDwell": 10, "tags": { "amenity": ["cafe"], "shop": ["bakery", "coffee"] } },
+    { "key": "food",     "label": "Food",          "emoji": "🍽️", "minDwell": 30, "tags": { "amenity": ["restaurant", "fast_food", "food_court", "pub"] } },
+    { "key": "outdoors", "label": "Walk / park",   "emoji": "🌳", "minDwell": 20, "tags": { "leisure": ["park", "nature_reserve", "garden"], "tourism": ["viewpoint"] } },
+    { "key": "shopping", "label": "Shopping",      "emoji": "🛍️", "minDwell": 20, "tags": { "shop": ["supermarket", "mall", "department_store", "books"] } },
+    { "key": "culture",  "label": "Culture",       "emoji": "🏛️", "minDwell": 45, "tags": { "tourism": ["museum", "gallery", "attraction"], "historic": ["castle", "monument", "ruins"] } },
+    { "key": "fun",      "label": "Entertainment", "emoji": "🎬", "minDwell": 60, "tags": { "amenity": ["cinema", "theatre"], "leisure": ["bowling_alley", "sports_centre", "fitness_centre", "swimming_pool"] } },
+    { "key": "toilets",  "label": "Toilets",       "emoji": "🚻", "facility": true, "tags": { "amenity": ["toilets"] } }
+  ]
+}

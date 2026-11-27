@@ -1,0 +1,7 @@
+# Built by scripts/build_data.py (locally for testing, in GitHub Actions for the live site)
+data/
+site/
+*.osm.pbf
+__pycache__/
+.venv/
+.DS_Store

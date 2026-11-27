@@ -1,0 +1,69 @@
+# Builds the UK charger data from OpenStreetMap and publishes the site to GitHub Pages.
+# Runs weekly (fresh data), on every push to main (code changes), and on demand from the Actions tab.
+name: Build data and deploy
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 4 * * 1'   # Mondays 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pyosmium
+        run: pip install osmium==4.3.2
+
+      # The UK extract is ~2.3 GB. Cache it per ISO week so repeated pushes don't re-download it
+      # (Geofabrik asks users not to download the same file over and over).
+      - name: Work out cache week
+        id: week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: uk.osm.pbf
+          key: osm-uk-${{ steps.week.outputs.week }}
+
+      - name: Download UK OpenStreetMap extract
+        run: test -f uk.osm.pbf || curl -fsSL -o uk.osm.pbf https://download.geofabrik.de/europe/united-kingdom-latest.osm.pbf
+
+      - name: Build charger tiles
+        run: python scripts/build_data.py uk.osm.pbf site/data --source "OpenStreetMap UK (Geofabrik)"
+
+      - name: Assemble site
+        run: cp index.html app.js style.css categories.json site/
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

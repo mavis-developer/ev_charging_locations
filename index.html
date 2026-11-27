@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Charge &amp; Do</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>⚡ Charge &amp; Do</h1>
+    <p class="tagline">Find a charger with something worth doing while you wait.</p>
+  </header>
+
+  <main>
+    <aside id="panel">
+      <form id="search">
+        <label class="field">
+          <span>Where are you?</span>
+          <div class="row">
+            <input id="place" type="text" placeholder="UK town, postcode or address" autocomplete="off">
+            <button type="button" id="locate" title="Use my location">📍</button>
+          </div>
+        </label>
+
+        <label class="field">
+          <span>How long will you stop?</span>
+          <select id="dwell">
+            <option value="20">~20 min (quick top-up)</option>
+            <option value="45" selected>~45 min</option>
+            <option value="90">~1.5 hours</option>
+            <option value="180">3+ hours</option>
+          </select>
+        </label>
+
+        <fieldset class="field">
+          <span>What do you want to do?</span>
+          <div id="activities" class="chips"></div>
+        </fieldset>
+
+        <div class="field row-wrap">
+          <label class="field inline">
+            <span>Search within</span>
+            <select id="radius">
+              <option value="5000">5 km</option>
+              <option value="10000" selected>10 km</option>
+              <option value="25000">25 km</option>
+            </select>
+          </label>
+          <label class="check"><input type="checkbox" id="rapid"> Rapid only (50 kW+)</label>
+          <label class="check"><input type="checkbox" id="toilets"> Toilets nearby</label>
+        </div>
+
+        <button type="submit" id="go">Find chargers</button>
+      </form>
+
+      <div id="status" role="status"></div>
+      <ol id="results"></ol>
+      <p id="updated" class="meta"></p>
+    </aside>
+
+    <div id="map"></div>
+  </main>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
