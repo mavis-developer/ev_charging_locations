@@ -23,7 +23,7 @@ Geofabrik UK extract (.osm.pbf, ~2.3 GB) ─┤
 ```
 
 Open Charge Map needs a free API key (openchargemap.org → sign in → My profile → My Apps → Register an application).
-It's stored as the repo secret `OCM_API_KEY`. Without it, the build falls back to OpenStreetMap chargers only.
+It's stored as the repo secret `OPEN_CHARGE_MAP_NOV_2026` (the workflow passes it to the build as `OCM_API_KEY`). Without it, the build falls back to OpenStreetMap chargers only.
 
 In the browser, the app loads only the 1–4 tiles that overlap your search area, then filters and ranks locally,
 so a search takes well under a second.
