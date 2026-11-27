@@ -154,12 +154,12 @@ const esri = (service, opts = {}) => L.tileLayer(
   { maxZoom: 19, maxNativeZoom: 19, attribution: ESRI_CREDIT, ...opts },
 );
 const baseMaps = {
-  Streets: esri('World_Street_Map'),
-  Light: L.layerGroup([
+  'Light grey': L.layerGroup([
     esri('Canvas/World_Light_Gray_Base', { maxNativeZoom: 16 }),
     esri('Canvas/World_Light_Gray_Reference', { maxNativeZoom: 16 }),
   ]),
-  Dark: L.layerGroup([
+  Streets: esri('World_Street_Map'),
+  'Dark grey': L.layerGroup([
     esri('Canvas/World_Dark_Gray_Base', { maxNativeZoom: 16 }),
     esri('Canvas/World_Dark_Gray_Reference', { maxNativeZoom: 16 }),
   ]),
@@ -169,12 +169,14 @@ const baseMaps = {
   ]),
   OpenStreetMap: L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: OSM_CREDIT }),
 };
+// Default: Light grey (Dark grey on devices in dark mode). A style the viewer picks is remembered;
+// the key was renamed to 'basemap2' so earlier saved picks (e.g. the broken CARTO ones) are ignored.
 let savedBase = null;
-try { savedBase = localStorage.getItem('basemap'); } catch { /* storage blocked */ }
+try { savedBase = localStorage.getItem('basemap2'); } catch { /* storage blocked */ }
 const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches;
-(baseMaps[savedBase] || (prefersDark ? baseMaps.Dark : baseMaps.Streets)).addTo(map);
+(baseMaps[savedBase] || (prefersDark ? baseMaps['Dark grey'] : baseMaps['Light grey'])).addTo(map);
 L.control.layers(baseMaps, null, { position: 'topright' }).addTo(map);
-map.on('baselayerchange', (e) => { try { localStorage.setItem('basemap', e.name); } catch { /* ignore */ } });
+map.on('baselayerchange', (e) => { try { localStorage.setItem('basemap2', e.name); } catch { /* ignore */ } });
 const chargerLayer = L.layerGroup().addTo(map);
 const placeLayer = L.layerGroup().addTo(map);
 let originMarker = null;
